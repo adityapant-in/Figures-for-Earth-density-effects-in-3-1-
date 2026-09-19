@@ -1,0 +1,833 @@
+import numpy as np
+import matplotlib.pyplot as plt
+
+
+# ============================================================
+# FIGURE 3
+# nu_mu -> nu_e appearance event rate
+# L = 7000 km
+# Four-flavor (3+1) framework
+# ============================================================
+
+
+# ============================================================
+# 1. CONSTANTS
+# ============================================================
+
+R_EARTH = 6371.0                  # km
+KM_TO_EVINV = 5.0677307e9         # 1 km = 5.0677e9 eV^-1
+GEV_TO_EV = 1.0e9
+
+# Matter potential coefficient
+VCOEFF = 7.56e-14                 # eV
+
+Ye = 0.5
+
+
+# ============================================================
+# 2. FOUR-FLAVOR OSCILLATION PARAMETERS
+# ============================================================
+
+theta12 = np.deg2rad(33.44)
+theta13 = np.deg2rad(8.57)
+theta23 = np.deg2rad(49.0)
+
+theta14 = np.deg2rad(8.13)
+theta24 = np.deg2rad(5.40)
+theta34 = 0.0
+
+dm21 = 7.42e-5                     # eV^2
+dm31 = 2.51e-3                     # eV^2
+dm41 = 0.30                        # eV^2
+
+delta14 = 0.0
+delta24 = 0.0
+
+# True CP phase
+delta13 = np.deg2rad(-90.0)
+
+
+# ============================================================
+# 3. FOUR-SHELL EARTH MODEL
+# ============================================================
+
+R_INNER = 1221.0                  # km
+R_OUTER = 3480.0                  # km
+R_LOWER = 5701.0                  # km
+
+rho_inner = 13.0                  # g/cm^3
+rho_outer = 11.0                  # g/cm^3
+rho_lower = 5.0                   # g/cm^3
+rho_upper = 3.3                   # g/cm^3
+
+
+# ============================================================
+# 4. ROTATION MATRIX
+# ============================================================
+
+def R_ij(i, j, theta, delta=0.0):
+
+    R = np.eye(4, dtype=complex)
+
+    c = np.cos(theta)
+    s = np.sin(theta)
+
+    R[i, i] = c
+    R[j, j] = c
+
+    R[i, j] = s * np.exp(-1j * delta)
+    R[j, i] = -s * np.exp(+1j * delta)
+
+    return R
+
+
+# ============================================================
+# 5. 4 x 4 MIXING MATRIX
+#
+# U = R34 R24 R14 R23 R13 R12
+# ============================================================
+
+def U4(delta13):
+
+    R12 = R_ij(
+        0, 1,
+        theta12
+    )
+
+    R13 = R_ij(
+        0, 2,
+        theta13,
+        delta13
+    )
+
+    R23 = R_ij(
+        1, 2,
+        theta23
+    )
+
+    R14 = R_ij(
+        0, 3,
+        theta14,
+        delta14
+    )
+
+    R24 = R_ij(
+        1, 3,
+        theta24,
+        delta24
+    )
+
+    R34 = R_ij(
+        2, 3,
+        theta34
+    )
+
+    return (
+        R34
+        @ R24
+        @ R14
+        @ R23
+        @ R13
+        @ R12
+    )
+
+
+# ============================================================
+# 6. MASS-SQUARED MATRIX
+# ============================================================
+
+MASS = np.diag([
+    0.0,
+    dm21,
+    dm31,
+    dm41
+])
+
+
+# ============================================================
+# 7. EARTH DENSITY ALONG THE NEUTRINO CHORD
+# ============================================================
+
+def chord_rho(L, nsteps=400):
+
+    # Length of each spatial step
+    dx = L / nsteps
+
+    # Position along chord
+    x = (
+        -L / 2
+        +
+        (np.arange(nsteps) + 0.5) * dx
+    )
+
+    # Distance from Earth's center
+    r = np.sqrt(
+        R_EARTH**2
+        -
+        (L / 2)**2
+        +
+        x**2
+    )
+
+    # Start with upper mantle/crust
+    rho = np.full(
+        nsteps,
+        rho_upper
+    )
+
+    # Lower mantle
+    rho[r <= R_LOWER] = rho_lower
+
+    # Outer core
+    rho[r <= R_OUTER] = rho_outer
+
+    # Inner core
+    rho[r <= R_INNER] = rho_inner
+
+    return dx, rho
+
+
+# ============================================================
+# 8. PATH-AVERAGED DENSITY
+# ============================================================
+
+def average_density(L):
+
+    dx, rho = chord_rho(
+        L,
+        nsteps=400
+    )
+
+    return np.mean(rho)
+
+
+# ============================================================
+# 9. HAMILTONIAN
+# ============================================================
+
+def H_batch(
+    E,
+    rho,
+    delta13,
+    antinu=False
+):
+
+    U = U4(delta13)
+
+    # --------------------------------------------------------
+    # Neutrinos
+    # --------------------------------------------------------
+
+    if not antinu:
+
+        Uvac = U
+
+        V = np.array([
+            +VCOEFF * Ye * rho,
+            0.0,
+            0.0,
+            -VCOEFF * Ye * rho
+        ])
+
+    # --------------------------------------------------------
+    # Antineutrinos
+    # --------------------------------------------------------
+
+    else:
+
+        Uvac = U.conj()
+
+        V = np.array([
+            -VCOEFF * Ye * rho,
+            0.0,
+            0.0,
+            +VCOEFF * Ye * rho
+        ])
+
+    # Vacuum Hamiltonian
+
+    Hvac = (
+        Uvac
+        @ MASS
+        @ Uvac.conj().T
+    )
+
+    H = (
+        Hvac[None, :, :]
+        /
+        (
+            2.0
+            * E[:, None, None]
+            * GEV_TO_EV
+        )
+    )
+
+    # Add matter potential
+
+    H += np.diag(V)[None, :, :]
+
+    return H
+
+
+# ============================================================
+# 10. PROPAGATOR
+#
+# exp(-i H L)
+# ============================================================
+
+def propagator_action(
+    H,
+    length_km,
+    psi
+):
+
+    # Since H is Hermitian,
+    # use eigendecomposition
+
+    eigenvalues, eigenvectors = np.linalg.eigh(H)
+
+    # Evolution phase
+
+    phase = np.exp(
+        -1j
+        *
+        eigenvalues
+        *
+        length_km
+        *
+        KM_TO_EVINV
+    )
+
+    # --------------------------------------------------------
+    # Single initial state
+    # --------------------------------------------------------
+
+    if psi.ndim == 1:
+
+        coeff = np.einsum(
+            'nij,j->ni',
+            eigenvectors.conj().transpose(0, 2, 1),
+            psi
+        )
+
+        coeff *= phase
+
+        return np.einsum(
+            'nij,nj->ni',
+            eigenvectors,
+            coeff
+        )
+
+    # --------------------------------------------------------
+    # Batch of initial states
+    # --------------------------------------------------------
+
+    coeff = np.einsum(
+        'nij,nj->ni',
+        eigenvectors.conj().transpose(0, 2, 1),
+        psi
+    )
+
+    coeff *= phase
+
+    return np.einsum(
+        'nij,nj->ni',
+        eigenvectors,
+        coeff
+    )
+
+
+# ============================================================
+# 11. LAYERED-EARTH OSCILLATION PROBABILITY
+# ============================================================
+
+def layered_probability(
+    E,
+    L,
+    delta13,
+    antinu=False
+):
+
+    # 400 spatial steps
+    dx, rho = chord_rho(
+        L,
+        nsteps=400
+    )
+
+    # Initial pure nu_mu state
+    #
+    # basis:
+    # |nu_e>  = [1,0,0,0]
+    # |nu_mu> = [0,1,0,0]
+    # |nu_tau>= [0,0,1,0]
+    # |nu_s>  = [0,0,0,1]
+
+    psi = np.zeros(
+        (len(E), 4),
+        dtype=complex
+    )
+
+    psi[:, 1] = 1.0
+
+    # Find boundaries between density shells
+
+    boundaries = [0]
+
+    for i in range(
+        1,
+        len(rho)
+    ):
+
+        if rho[i] != rho[i - 1]:
+
+            boundaries.append(i)
+
+    boundaries.append(
+        len(rho)
+    )
+
+    # Propagate through each constant-density region
+
+    for a, b in zip(
+        boundaries[:-1],
+        boundaries[1:]
+    ):
+
+        rho_block = rho[a]
+
+        length = (
+            b - a
+        ) * dx
+
+        H = H_batch(
+            E,
+            rho_block,
+            delta13,
+            antinu
+        )
+
+        psi = propagator_action(
+            H,
+            length,
+            psi
+        )
+
+    # Appearance probability
+
+    P_mu_e = np.abs(
+        psi[:, 0]
+    )**2
+
+    return P_mu_e
+
+
+# ============================================================
+# 12. CONSTANT-DENSITY PROBABILITY
+# ============================================================
+
+def constant_probability(
+    E,
+    L,
+    delta13,
+    rho,
+    antinu=False
+):
+
+    H = H_batch(
+        E,
+        rho,
+        delta13,
+        antinu
+    )
+
+    # Initial nu_mu
+
+    psi0 = np.array([
+        0.0,
+        1.0,
+        0.0,
+        0.0
+    ], dtype=complex)
+
+    psi = propagator_action(
+        H,
+        L,
+        psi0
+    )
+
+    return np.abs(
+        psi[:, 0]
+    )**2
+
+
+# ============================================================
+# 13. GAUSSIAN ENERGY SMEARING
+#
+# sigma_E = 5% E
+# ============================================================
+
+def gaussian_smear(
+    E,
+    spectrum,
+    resolution=0.05
+):
+
+    sigma = (
+        resolution
+        * E
+    )
+
+    # Gaussian kernel
+
+    kernel = np.exp(
+        -0.5
+        *
+        (
+            (E[:, None] - E[None, :])
+            /
+            sigma[:, None]
+        )**2
+    )
+
+    # Normalize each row
+
+    kernel /= np.sum(
+        kernel,
+        axis=1,
+        keepdims=True
+    )
+
+    return (
+        kernel
+        @ spectrum
+    )
+
+
+# ============================================================
+# 14. EVENT-RATE SPECTRUM
+#
+# phi(E) ~ exp(-E/3)
+# sigma(E) ~ E
+# efficiency = 80%
+# ============================================================
+
+def event_spectrum(
+    E,
+    L,
+    delta13,
+    layered=True
+):
+
+    # Beam flux
+
+    flux = np.exp(
+        -E / 3.0
+    )
+
+    # Cross section
+
+    cross_section = E
+
+    # Detector efficiency
+
+    efficiency = 0.80
+
+    # Overall weight
+
+    weight = (
+        flux
+        *
+        cross_section
+        *
+        efficiency
+    )
+
+    # --------------------------------------------------------
+    # Layered Earth
+    # --------------------------------------------------------
+
+    if layered:
+
+        P = layered_probability(
+            E,
+            L,
+            delta13,
+            antinu=False
+        )
+
+    # --------------------------------------------------------
+    # Constant density
+    # --------------------------------------------------------
+
+    else:
+
+        rho_avg = average_density(
+            L
+        )
+
+        P = constant_probability(
+            E,
+            L,
+            delta13,
+            rho_avg,
+            antinu=False
+        )
+
+    # Event rate
+
+    rate = (
+        weight
+        *
+        P
+    )
+
+    # Detector energy resolution
+
+    rate = gaussian_smear(
+        E,
+        rate,
+        resolution=0.05
+    )
+
+    return rate
+
+
+# ============================================================
+# 15. PARAMETERS FOR FIGURE 3
+# ============================================================
+
+L = 7000                         # km
+
+# 400 energy points, 2–6 GeV
+
+E = np.linspace(
+    2.0,
+    6.0,
+    400
+)
+
+# Path-averaged density
+
+rho_avg = average_density(L)
+
+print(
+    "Baseline:",
+    L,
+    "km"
+)
+
+print(
+    "Average density:",
+    rho_avg,
+    "g/cm^3"
+)
+
+
+# ============================================================
+# 16. TRUE LAYERED SPECTRUM
+# ============================================================
+
+N_layered_raw = event_spectrum(
+    E,
+    L,
+    delta13,
+    layered=True
+)
+
+
+# ============================================================
+# 17. CONSTANT-DENSITY SPECTRUM
+# ============================================================
+
+N_constant_raw = event_spectrum(
+    E,
+    L,
+    delta13,
+    layered=False
+)
+
+
+# ============================================================
+# 18. NORMALIZATION
+#
+# True spectrum -> 10^5 events
+# ============================================================
+
+N_total = 1e5
+
+normalization = (
+    N_total
+    /
+    np.sum(N_layered_raw)
+)
+
+N_layered = (
+    N_layered_raw
+    *
+    normalization
+)
+
+N_constant = (
+    N_constant_raw
+    *
+    normalization
+)
+
+
+# ============================================================
+# 19. 1-SIGMA UNCERTAINTY
+#
+# statistical uncertainty = sqrt(N)
+# systematic uncertainty = 5% N
+#
+# combined:
+#
+# sigma = sqrt[N + (0.05N)^2]
+# ============================================================
+
+sigma_layered = np.sqrt(
+    N_layered
+    +
+    (
+        0.05
+        *
+        N_layered
+    )**2
+)
+
+sigma_constant = np.sqrt(
+    N_constant
+    +
+    (
+        0.05
+        *
+        N_constant
+    )**2
+)
+
+
+# ============================================================
+# 20. PLOT FIGURE 3
+# ============================================================
+
+fig, ax = plt.subplots(
+    figsize=(8, 5.5)
+)
+
+
+# ------------------------------------------------------------
+# Layered PREM-like profile
+# ------------------------------------------------------------
+
+ax.plot(
+    E,
+    N_layered,
+    linewidth=2.0,
+    label="Layered PREM-like profile"
+)
+
+ax.fill_between(
+    E,
+    N_layered - sigma_layered,
+    N_layered + sigma_layered,
+    alpha=0.20
+)
+
+
+# ------------------------------------------------------------
+# Constant-density approximation
+# ------------------------------------------------------------
+
+ax.plot(
+    E,
+    N_constant,
+    linestyle="--",
+    linewidth=2.0,
+    label="Constant-density approximation"
+)
+
+ax.fill_between(
+    E,
+    N_constant - sigma_constant,
+    N_constant + sigma_constant,
+    alpha=0.20
+)
+
+
+# ------------------------------------------------------------
+# Axis labels
+# ------------------------------------------------------------
+
+ax.set_xlabel(
+    r"Reconstructed neutrino energy $E_\nu$ (GeV)"
+)
+
+ax.set_ylabel(
+    "Event rate"
+)
+
+
+ax.set_title(
+    r"$\nu_\mu \rightarrow \nu_e$ appearance at "
+    r"$L=7000$ km, 4-flavor $(3+1)$"
+)
+
+
+# ------------------------------------------------------------
+# Axis limits
+# ------------------------------------------------------------
+
+ax.set_xlim(
+    2.0,
+    6.0
+)
+
+
+# ------------------------------------------------------------
+# Legend
+# ------------------------------------------------------------
+
+ax.legend(
+    frameon=False
+)
+
+
+# Light grid
+
+ax.grid(
+    alpha=0.15
+)
+
+
+plt.tight_layout()
+
+plt.show()
+
+
+# ============================================================
+# 21. NUMERICAL CHECK
+# ============================================================
+
+print("\n========================================")
+print("FIGURE 3 CHECK")
+print("========================================")
+
+print(
+    "Layered total events =",
+    np.sum(N_layered)
+)
+
+print(
+    "Constant total events =",
+    np.sum(N_constant)
+)
+
+print(
+    "Maximum layered rate =",
+    np.max(N_layered)
+)
+
+print(
+    "Maximum constant rate =",
+    np.max(N_constant)
+)
