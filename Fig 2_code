@@ -1,0 +1,834 @@
+
+import numpy as np
+import matplotlib.pyplot as plt
+
+R_EARTH = 6371.0                  # Earth radius [km]
+KM_TO_EVINV = 5.0677307e9         # km -> eV^-1
+GEV_TO_EV = 1.0e9
+
+# Matter potential coefficient
+# A_CC = 7.56e-14 * Ye * rho  [eV]
+VCOEFF = 7.56e-14
+
+Ye = 0.5
+
+
+theta12 = np.deg2rad(33.44)
+theta13 = np.deg2rad(8.57)
+theta23 = np.deg2rad(49.0)
+
+theta14 = np.deg2rad(8.13)
+theta24 = np.deg2rad(5.40)
+theta34 = 0.0
+
+dm21 = 7.42e-5       # eV^2
+dm31 = 2.51e-3       # eV^2
+dm41 = 0.30          # eV^2
+
+delta14 = 0.0
+delta24 = 0.0
+
+# True CP phase
+delta_true = np.deg2rad(-90.0)
+
+
+
+R_INNER = 1221.0
+R_OUTER = 3480.0
+R_LOWER = 5701.0
+
+rho_inner = 13.0
+rho_outer = 11.0
+rho_lower = 5.0
+rho_upper = 3.3
+
+
+
+def R_ij(i, j, theta, delta=0.0):
+
+    M = np.eye(4, dtype=complex)
+
+    c = np.cos(theta)
+    s = np.sin(theta)
+
+    M[i, i] = c
+    M[j, j] = c
+
+    M[i, j] = s * np.exp(-1j * delta)
+    M[j, i] = -s * np.exp(+1j * delta)
+
+    return M
+
+
+def U4(delta13):
+
+    return (
+        R_ij(2, 3, theta34)
+        @ R_ij(1, 3, theta24, delta24)
+        @ R_ij(0, 3, theta14, delta14)
+        @ R_ij(1, 2, theta23)
+        @ R_ij(0, 2, theta13, delta13)
+        @ R_ij(0, 1, theta12)
+    )
+
+
+
+def chord_rho(L, nsteps=400):
+
+    dx = L / nsteps
+
+    # Position along chord
+    x = -L/2 + (np.arange(nsteps) + 0.5) * dx
+
+    # Distance from Earth's center
+    r = np.sqrt(
+        R_EARTH**2
+        - (L/2)**2
+        + x**2
+    )
+
+    # Start with upper mantle/crust
+    rho = np.full(
+        nsteps,
+        rho_upper
+    )
+
+    # Lower mantle
+    rho[r <= R_LOWER] = rho_lower
+
+    # Outer core
+    rho[r <= R_OUTER] = rho_outer
+
+    # Inner core
+    rho[r <= R_INNER] = rho_inner
+
+    return dx, rho
+
+
+def rho_average(L):
+
+    dx, rho = chord_rho(L)
+
+    return np.mean(rho)
+
+
+# ============================================================
+# 4. MASS-SQUARED MATRIX
+# ============================================================
+
+MASS = np.diag([
+    0.0,
+    dm21,
+    dm31,
+    dm41
+])
+
+
+# ============================================================
+# 5. HAMILTONIAN FOR A BATCH OF ENERGIES
+# ============================================================
+
+def H_batch(E, rho, delta13, antinu=False):
+
+    U = U4(delta13)
+
+    if antinu:
+
+        # U -> U*
+        Uv = U.conj()
+
+        # V -> -V
+        matter = np.array([
+            -VCOEFF * Ye * rho,
+            0.0,
+            0.0,
+            +VCOEFF * Ye * rho
+        ])
+
+    else:
+
+        Uv = U
+
+        matter = np.array([
+            +VCOEFF * Ye * rho,
+            0.0,
+            0.0,
+            -VCOEFF * Ye * rho
+        ])
+
+    # Vacuum Hamiltonian
+    Hvac = Uv @ MASS @ Uv.conj().T
+
+    H = (
+        Hvac[None, :, :]
+        /
+        (
+            2.0
+            * E[:, None, None]
+            * GEV_TO_EV
+        )
+    )
+
+    # Matter Hamiltonian
+    H += np.diag(matter)[None, :, :]
+
+    return H
+
+
+# ============================================================
+# 6. PROPAGATOR
+#
+# exp(-iHL)
+#
+# Uses eigendecomposition because H is Hermitian.
+# ============================================================
+
+def propagator_action(H, length_km, psi):
+
+    eigenvalues, eigenvectors = np.linalg.eigh(H)
+
+    phase = np.exp(
+        -1j
+        * eigenvalues
+        * length_km
+        * KM_TO_EVINV
+    )
+
+    # V† psi
+    if psi.ndim == 1:
+
+        coeff = np.einsum(
+            'nij,j->ni',
+            eigenvectors.conj().transpose(0, 2, 1),
+            psi
+        )
+
+        coeff *= phase
+
+        # V coeff
+        return np.einsum(
+            'nij,nj->ni',
+            eigenvectors,
+            coeff
+        )
+
+    else:
+
+        coeff = np.einsum(
+            'nij,nj->ni',
+            eigenvectors.conj().transpose(0, 2, 1),
+            psi
+        )
+
+        coeff *= phase
+
+        return np.einsum(
+            'nij,nj->ni',
+            eigenvectors,
+            coeff
+        )
+
+
+# ============================================================
+# 7. LAYERED-EARTH PROBABILITY
+#
+# 400 spatial steps
+# ============================================================
+
+def layered_probability(
+    E,
+    L,
+    delta13,
+    antinu=False
+):
+
+    dx, rho = chord_rho(
+        L,
+        nsteps=400
+    )
+
+    # Initial pure nu_mu
+    psi = np.zeros(
+        (len(E), 4),
+        dtype=complex
+    )
+
+    psi[:, 1] = 1.0
+
+    # Find boundaries between different density shells
+    boundaries = [0]
+
+    for i in range(1, len(rho)):
+
+        if rho[i] != rho[i-1]:
+
+            boundaries.append(i)
+
+    boundaries.append(len(rho))
+
+    # Propagate through each constant-density block
+    for a, b in zip(
+        boundaries[:-1],
+        boundaries[1:]
+    ):
+
+        rho_block = rho[a]
+
+        length = (b - a) * dx
+
+        H = H_batch(
+            E,
+            rho_block,
+            delta13,
+            antinu
+        )
+
+        psi = propagator_action(
+            H,
+            length,
+            psi
+        )
+
+    # P(nu_mu -> nu_e)
+    return np.abs(
+        psi[:, 0]
+    )**2
+
+
+# ============================================================
+# 8. CONSTANT-DENSITY PROBABILITY
+# ============================================================
+
+def constant_probability(
+    E,
+    L,
+    delta13,
+    rho,
+    antinu=False
+):
+
+    H = H_batch(
+        E,
+        rho,
+        delta13,
+        antinu
+    )
+
+    # Pure nu_mu initial state
+    psi0 = np.array([
+        0.0,
+        1.0,
+        0.0,
+        0.0
+    ], dtype=complex)
+
+    psi = propagator_action(
+        H,
+        L,
+        psi0
+    )
+
+    return np.abs(
+        psi[:, 0]
+    )**2
+
+
+# ============================================================
+# 9. ENERGY SMEARING
+#
+# sigma_E = 5% E
+# ============================================================
+
+def smear(
+    E,
+    rate,
+    frac=0.05
+):
+
+    sigma = frac * E
+
+    kernel = np.exp(
+        -0.5
+        *
+        (
+            (E[:, None] - E[None, :])
+            /
+            sigma[:, None]
+        )**2
+    )
+
+    # Normalize each Gaussian
+    kernel /= np.sum(
+        kernel,
+        axis=1,
+        keepdims=True
+    )
+
+    return kernel @ rate
+
+
+# ============================================================
+# 10. EVENT-RATE SPECTRUM
+#
+# Flux       ~ exp(-E/3)
+# Cross sec. ~ E
+# Efficiency = 80%
+# ============================================================
+
+def raw_spectrum(
+    E,
+    L,
+    delta13,
+    constant=False,
+    rho=None
+):
+
+    flux = np.exp(
+        -E / 3.0
+    )
+
+    cross_section = E
+
+    efficiency = 0.80
+
+    weight = (
+        flux
+        * cross_section
+        * efficiency
+    )
+
+    # -------------------------
+    # Oscillation probabilities
+    # -------------------------
+
+    if constant:
+
+        Pnu = constant_probability(
+            E,
+            L,
+            delta13,
+            rho,
+            antinu=False
+        )
+
+        Panu = constant_probability(
+            E,
+            L,
+            delta13,
+            rho,
+            antinu=True
+        )
+
+    else:
+
+        Pnu = layered_probability(
+            E,
+            L,
+            delta13,
+            antinu=False
+        )
+
+        Panu = layered_probability(
+            E,
+            L,
+            delta13,
+            antinu=True
+        )
+
+    # -------------------------
+    # Event rates
+    # -------------------------
+
+    Nnu = (
+        weight
+        * Pnu
+    )
+
+    Nanu = (
+        weight
+        * Panu
+    )
+
+    # -------------------------
+    # Energy resolution
+    # -------------------------
+
+    Nnu = smear(
+        E,
+        Nnu
+    )
+
+    Nanu = smear(
+        E,
+        Nanu
+    )
+
+    return Nnu, Nanu
+
+
+# ============================================================
+# 11. NORMALIZE TRUE SPECTRUM
+#
+# N = 10^5 total events
+# ============================================================
+
+def normalize(
+    Nnu,
+    Nanu,
+    Ntot=1e5
+):
+
+    factor = (
+        Ntot
+        /
+        (
+            Nnu.sum()
+            +
+            Nanu.sum()
+        )
+    )
+
+    return (
+        Nnu * factor,
+        Nanu * factor
+    )
+
+
+# ============================================================
+# 12. PEARSON CHI-SQUARE
+# ============================================================
+
+def chi2(
+    true_nu,
+    true_anu,
+    test_nu,
+    test_anu
+):
+
+    chi_nu = np.sum(
+        (
+            test_nu
+            -
+            true_nu
+        )**2
+        /
+        (
+            true_nu + 1.0
+        )
+    )
+
+    chi_anu = np.sum(
+        (
+            test_anu
+            -
+            true_anu
+        )**2
+        /
+        (
+            true_anu + 1.0
+        )
+    )
+
+    return (
+        chi_nu
+        +
+        chi_anu
+    )
+
+
+# ============================================================
+# 13. MAIN FIGURE 2 CALCULATION
+# ============================================================
+
+# Energy grid:
+# 400 points from 2 to 6 GeV
+
+E = np.linspace(
+    2.0,
+    6.0,
+    400
+)
+
+# 181 values:
+# -180, -178, ..., +178, +180
+
+delta_deg = np.arange(
+    -180.0,
+    181.0,
+    2.0
+)
+
+delta_rad = np.deg2rad(
+    delta_deg
+)
+
+# Four baselines used in Figure 2
+
+baselines = [
+    3000,
+    5000,
+    7000,
+    9000
+]
+
+results = {}
+
+
+print(
+    "Running the full 4-flavor calculation...\n"
+)
+
+
+for L in baselines:
+
+    # --------------------------------------
+    # Path averaged density
+    # --------------------------------------
+
+    rho_avg = rho_average(L)
+
+    print(
+        f"L = {L} km | "
+        f"rho_avg = "
+        f"{rho_avg:.4f} g/cm^3"
+    )
+
+    # --------------------------------------
+    # TRUE SPECTRUM
+    #
+    # Layered Earth
+    # delta_true = -90 degrees
+    # --------------------------------------
+
+    true_raw_nu, true_raw_anu = raw_spectrum(
+        E,
+        L,
+        delta_true,
+        constant=False
+    )
+
+    # Scale TRUE spectrum to 10^5 events
+
+    true_nu, true_anu = normalize(
+        true_raw_nu,
+        true_raw_anu
+    )
+
+    # --------------------------------------
+    # Scan test delta13
+    # --------------------------------------
+
+    chi_values = []
+
+    for delta_test in delta_rad:
+
+        # Constant-density TEST spectrum
+
+        test_raw_nu, test_raw_anu = raw_spectrum(
+            E,
+            L,
+            delta_test,
+            constant=True,
+            rho=rho_avg
+        )
+
+        # IMPORTANT:
+        # Use the SAME exposure normalization
+        # determined from the TRUE spectrum.
+
+        scale = (
+            1e5
+            /
+            (
+                true_raw_nu.sum()
+                +
+                true_raw_anu.sum()
+            )
+        )
+
+        test_nu = (
+            test_raw_nu
+            * scale
+        )
+
+        test_anu = (
+            test_raw_anu
+            * scale
+        )
+
+        # ----------------------------------
+        # Pearson chi-square
+        # ----------------------------------
+
+        value = chi2(
+            true_nu,
+            true_anu,
+            test_nu,
+            test_anu
+        )
+
+        chi_values.append(
+            value
+        )
+
+    chi_values = np.asarray(
+        chi_values
+    )
+
+    # --------------------------------------
+    # Normalize chi-square profile
+    # --------------------------------------
+
+    chi_norm = (
+        chi_values
+        /
+        np.max(chi_values)
+    )
+
+    # Best fit
+
+    minimum_index = np.argmin(
+        chi_values
+    )
+
+    best_delta = (
+        delta_deg[
+            minimum_index
+        ]
+    )
+
+    results[L] = {
+
+        "rho": rho_avg,
+
+        "chi": chi_values,
+
+        "chi_norm": chi_norm,
+
+        "best_delta": best_delta
+    }
+
+    print(
+        f"    best-fit delta13 = "
+        f"{best_delta:.1f} deg"
+    )
+
+
+# ============================================================
+# 14. PLOT FIGURE 2
+# ============================================================
+
+fig, ax = plt.subplots(
+    figsize=(8, 5.5)
+)
+
+
+for L in baselines:
+
+    ax.plot(
+        delta_deg,
+        results[L]["chi_norm"],
+        linewidth=1.8,
+        label=f"L = {L} km"
+    )
+
+
+# True value
+ax.axvline(
+    -90,
+    linestyle="--",
+    linewidth=1.2
+)
+
+
+# Labels
+
+ax.set_xlabel(
+    r"Test $\delta_{13}$ (degrees)"
+)
+
+ax.set_ylabel(
+    r"$\Delta\chi^2$ (normalized)"
+)
+
+ax.set_title(
+    r"$\Delta\chi^2$ profiles, "
+    r"4-flavor (3+1) framework"
+)
+
+
+# Limits
+
+ax.set_xlim(
+    -180,
+    180
+)
+
+ax.set_ylim(
+    -0.02,
+    1.05
+)
+
+
+# Ticks
+
+ax.set_xticks([
+    -150,
+    -100,
+    -50,
+    0,
+    50,
+    100,
+    150
+])
+
+ax.set_yticks([
+    0.0,
+    0.2,
+    0.4,
+    0.6,
+    0.8,
+    1.0
+])
+
+
+# Legend
+
+ax.legend(
+    frameon=False,
+    loc="lower right"
+)
+
+
+plt.tight_layout()
+
+plt.show()
+
+
+# ============================================================
+# 15. PRINT RESULTS
+# ============================================================
+
+print(
+    "\n============================================"
+)
+
+print(
+    "FIGURE 2 REPRODUCTION CHECK"
+)
+
+print(
+    "============================================"
+)
+
+
+for L in baselines:
+
+    print(
+        f"{L:5d} km : "
+        f"rho_avg = "
+        f"{results[L]['rho']:.4f} "
+        f"g/cm^3 | "
+        f"best-fit delta13 = "
+        f"{results[L]['best_delta']:.1f} deg"
+    )
