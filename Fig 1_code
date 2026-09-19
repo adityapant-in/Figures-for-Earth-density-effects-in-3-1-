@@ -1,0 +1,81 @@
+import numpy as np
+import matplotlib.pyplot as plt
+
+# Baseline (km)
+L = np.array([
+    1000, 2000, 3000, 4000, 5000,
+    6000, 7000, 8000, 9000, 10000, 11000, 12000
+])
+
+# 3-flavor bias |Delta delta_13| (degrees)
+bias_3f = np.array([
+    0.1, 0.1, 0.1, 0.1, 0.1,
+    60, 66, 22, 16, 8, 28, 56
+])
+
+# 4-flavor (3+1) bias |Delta delta_13| (degrees)
+bias_4f = np.array([
+    0.1, 0.1, 0.1, 0.1, 0.1,
+    44, 42, 32, 10, 18, 76, 84
+])
+
+# Create figure
+plt.figure(figsize=(8, 5.5))
+
+# Plot 3-flavor
+plt.plot(
+    L, bias_3f,
+    marker='o',
+    linewidth=1.8,
+    markersize=6,
+    label='3-flavor (sterile decoupled)'
+)
+
+# Plot 4-flavor
+plt.plot(
+    L, bias_4f,
+    marker='s',
+    linewidth=1.8,
+    markersize=6,
+    label='4-flavor (3+1 sterile)'
+)
+
+# Logarithmic y-axis
+plt.yscale('log')
+
+# Reference lines
+plt.axhline(
+    1,
+    linestyle=':',
+    linewidth=1.2
+)
+
+plt.axhline(
+    10,
+    linestyle=':',
+    linewidth=1.2
+)
+
+# Labels
+plt.xlabel(r'Baseline $L$ (km)')
+plt.ylabel(r'$|\Delta\delta_{13}|$ (degrees)')
+plt.title(r'Bias in reconstructed $\delta_{13}$')
+
+# X-axis
+plt.xticks([
+    2000, 4000, 6000,
+    8000, 10000, 12000
+])
+
+plt.xlim(800, 12200)
+
+# Y-axis
+plt.ylim(0.07, 120)
+
+# Legend
+plt.legend()
+
+plt.tight_layout()
+plt.savefig("fig1_4.pdf", bbox_inches="tight")
+
+plt.show()
